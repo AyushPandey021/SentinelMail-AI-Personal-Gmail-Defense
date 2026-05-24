@@ -108,6 +108,14 @@ async function processMessage(mailbox, message) {
   });
 }
 
+async function existingEmail(mailbox, uid) {
+  const { emails } = await collections();
+  return emails.findOne(
+    { mailboxId: mailbox._id, providerMessageId: `gmail:${uid}` },
+    { projection: { _id: 1, category: 1 } }
+  );
+}
+
 export function getGmailStatus() {
   return {
     configured: gmailConfigured(),
@@ -150,9 +158,16 @@ export async function syncGmailInbox() {
       const fullBackfill = env.GMAIL_FULL_SYNC && !mailbox.fullGmailSyncCompleted;
       const range = fullBackfill || !lastUid ? "1:*" : `${lastUid + 1}:*`;
       logger.info({ email: env.GMAIL_EMAIL, range, inboxCount: inbox.exists, fullBackfill }, "gmail sync started");
-      for await (const message of client.fetch(range, { uid: true, source: true, internalDate: true }, { uid: true })) {
+      for await (const message of client.fetch(range, { uid: true, internalDate: true }, { uid: true })) {
         maxUid = Math.max(maxUid, message.uid ?? 0);
-        const result = await processMessage(mailbox, message);
+        const existing = await existingEmail(mailbox, message.uid);
+        if (existing?.category) {
+          skipped += 1;
+          continue;
+        }
+
+        const messageWithSource = await client.fetchOne(message.uid, { uid: true, source: true, internalDate: true }, { uid: true });
+        const result = await processMessage(mailbox, messageWithSource);
         if (result.skipped) skipped += 1;
         else analyzed += 1;
       }
@@ -177,7 +192,7 @@ export async function syncGmailInbox() {
     logger.error({ err }, "gmail sync failed");
     throw err;
   } finally {
-    await client.logout().catch(() => {});
+    await client.logout().catch(() => { });
     syncRunning = false;
   }
 }
@@ -189,8 +204,8 @@ export function startGmailPoller() {
   }
 
   logger.info({ email: env.GMAIL_EMAIL, pollIntervalSeconds: env.GMAIL_POLL_INTERVAL_SECONDS }, "Gmail analyzer enabled");
-  syncGmailInbox().catch(() => {});
+  syncGmailInbox().catch(() => { });
   setInterval(() => {
-    syncGmailInbox().catch(() => {});
+    syncGmailInbox().catch(() => { });
   }, env.GMAIL_POLL_INTERVAL_SECONDS * 1000);
 }
